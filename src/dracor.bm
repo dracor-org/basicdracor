@@ -1,0 +1,355 @@
+' basicDraCor - implementation. Include at the BOTTOM of your program.
+' See dracor.bi for the shared variables and README.md for the function list.
+
+'$INCLUDE: '../vendor/qb64pe-json/json.bm'
+
+' ---------------------------------------------------------------------------
+' Configuration
+' ---------------------------------------------------------------------------
+
+SUB DracorSetApiUrl (url AS STRING)
+    DIM u AS STRING
+    u = url
+    DO WHILE RIGHT$(u, 1) = "/"
+        u = LEFT$(u, LEN(u) - 1)
+    LOOP
+    DracorApiUrl = u
+END SUB
+
+FUNCTION DracorGetApiUrl$
+    DracorGetApiUrl$ = DracorApiUrl
+END FUNCTION
+
+' ---------------------------------------------------------------------------
+' HTTP
+' ---------------------------------------------------------------------------
+
+' GET a URL and return the body. Sets DracorStatus, DracorFinalUrl and
+' DracorError (empty on success, i.e. HTTP 200). Redirects are followed.
+' gzip-compressed bodies are decompressed transparently.
+FUNCTION DracorHttpGet$ (url AS STRING)
+    DIM h AS LONG, body AS STRING, chunk AS STRING
+    DIM t0 AS DOUBLE, elapsed AS DOUBLE
+
+    DracorStatus = 0
+    DracorError = ""
+    DracorFinalUrl = ""
+
+    h = _OPENCLIENT("HTTP:" + url)
+    IF h = 0 THEN
+        DracorError = "Could not connect to " + url
+        EXIT FUNCTION
+    END IF
+
+    t0 = TIMER(.001)
+    DO
+        GET #h, , chunk
+        body = body + chunk
+        IF EOF(h) THEN EXIT DO
+        elapsed = TIMER(.001) - t0
+        IF elapsed < 0 THEN elapsed = elapsed + 86400 ' midnight
+        IF elapsed > DRACOR_TIMEOUT_SECONDS THEN
+            CLOSE h
+            DracorError = "Timeout while reading " + url
+            EXIT FUNCTION
+        END IF
+        _LIMIT 200
+    LOOP
+
+    ' Workaround for a bug in QB64-PE 4.7.0 (internal/c/libqb/src/qb_http.cpp):
+    ' when a response has no body, the status code and final URL are never
+    ' read from libcurl, and _STATUSCODE then raises "Subscript out of range".
+    ' DraCor answers 404 (unknown corpus, play or ID) with an empty body, so we
+    ' only ask for the status when there is a body, and otherwise report an
+    ' unknown status (-1).
+    IF LEN(body) = 0 THEN
+        CLOSE h
+        DracorStatus = -1
+        DracorError = "Empty response (not found, or nothing to return; HTTP status unavailable) for " + url
+        EXIT FUNCTION
+    END IF
+
+    DracorStatus = _STATUSCODE(h)
+    DracorFinalUrl = _CONNECTIONADDRESS$(h)
+    IF LEFT$(DracorFinalUrl, 5) = "HTTP:" THEN DracorFinalUrl = MID$(DracorFinalUrl, 6)
+    CLOSE h
+
+    ' The QB64-PE HTTP client does not ask for compression, but the DraCor
+    ' server sends some responses gzip-compressed anyway.
+    IF DracorIsGzip%(body) THEN body = DracorGunzip$(body)
+    IF DracorError <> "" THEN EXIT FUNCTION
+
+    IF DracorStatus <> 200 THEN
+        DracorError = "HTTP" + STR$(DracorStatus) + " for " + url
+    END IF
+    DracorHttpGet$ = body
+END FUNCTION
+
+' GET a path relative to the API base URL, e.g. "/info".
+FUNCTION DracorGet$ (path AS STRING)
+    DracorGet$ = DracorHttpGet$(DracorApiUrl + path)
+END FUNCTION
+
+FUNCTION DracorIsGzip% (s AS STRING)
+    DracorIsGzip% = 0
+    IF LEN(s) >= 18 THEN
+        IF ASC(s, 1) = &H1F AND ASC(s, 2) = &H8B THEN DracorIsGzip% = -1
+    END IF
+END FUNCTION
+
+' Decompress a gzip member (RFC 1952) with QB64-PE's _INFLATE$, which only
+' understands zlib streams: we strip the gzip header, put a zlib header in
+' front of the raw deflate data and use the size from the gzip trailer. The
+' zlib Adler-32 check cannot be satisfied this way, so the result is checked
+' against the CRC-32 in the gzip trailer instead.
+FUNCTION DracorGunzip$ (s AS STRING)
+    DIM flags AS LONG, p AS LONG, xlen AS LONG
+    DIM isize AS _UNSIGNED LONG, crc AS _UNSIGNED LONG
+    DIM deflated AS STRING, res AS STRING
+
+    IF ASC(s, 3) <> 8 THEN DracorError = "gzip: unknown compression method": EXIT FUNCTION
+    flags = ASC(s, 4)
+    p = 11
+    IF flags AND 4 THEN ' FEXTRA
+        xlen = ASC(s, p) + 256 * ASC(s, p + 1)
+        p = p + 2 + xlen
+    END IF
+    IF flags AND 8 THEN p = INSTR(p, s, CHR$(0)) + 1 ' FNAME
+    IF flags AND 16 THEN p = INSTR(p, s, CHR$(0)) + 1 ' FCOMMENT
+    IF flags AND 2 THEN p = p + 2 ' FHCRC
+    IF p <= 1 OR p > LEN(s) - 8 THEN DracorError = "gzip: bad header": EXIT FUNCTION
+
+    crc = _CV(_UNSIGNED LONG, MID$(s, LEN(s) - 7, 4))
+    isize = _CV(_UNSIGNED LONG, RIGHT$(s, 4))
+    IF isize = 0 THEN EXIT FUNCTION
+
+    deflated = MID$(s, p, LEN(s) - 8 - p + 1)
+    res = _INFLATE$(CHR$(&H78) + CHR$(&H9C) + deflated, isize)
+    IF _CRC32(res) <> crc THEN DracorError = "gzip: CRC mismatch": EXIT FUNCTION
+    DracorGunzip$ = res
+END FUNCTION
+
+' ---------------------------------------------------------------------------
+' JSON endpoints
+'
+' Each function fills the Json object j (no JsonInit needed; any previous
+' content of j is released) and returns the root token (> 0), or -1 on error
+' (see DracorError). Call JsonClear j when you are done with it.
+' ---------------------------------------------------------------------------
+
+FUNCTION DracorGetJson& (j AS Json, path AS STRING)
+    DIM body AS STRING
+    DracorGetJson& = -1
+
+    JsonClear j
+    JsonInit j
+
+    body = DracorGet$(path)
+    IF DracorError <> "" THEN EXIT FUNCTION
+
+    IF JsonParse&(j, body) <> JSON_ERR_Success THEN
+        DracorError = "JSON parse error: " + JsonError
+        EXIT FUNCTION
+    END IF
+    DracorGetJson& = JsonGetRootToken&(j)
+END FUNCTION
+
+' /info - API name, version, ...
+FUNCTION DracorGetInfo& (j AS Json)
+    DracorGetInfo& = DracorGetJson&(j, "/info")
+END FUNCTION
+
+' /corpora - array of corpora. includeMetrics <> 0 adds a "metrics" object
+' (number of plays, characters, ...) to each corpus.
+FUNCTION DracorGetCorpora& (j AS Json, includeMetrics AS INTEGER)
+    IF includeMetrics THEN
+        DracorGetCorpora& = DracorGetJson&(j, "/corpora?include=metrics")
+    ELSE
+        DracorGetCorpora& = DracorGetJson&(j, "/corpora")
+    END IF
+END FUNCTION
+
+' /corpora/{corpusname} - corpus description with its "plays" array.
+FUNCTION DracorGetCorpus& (j AS Json, corpusname AS STRING)
+    DracorGetCorpus& = DracorGetJson&(j, "/corpora/" + DracorUrlEncode$(corpusname))
+END FUNCTION
+
+FUNCTION DracorPlayPath$ (corpusname AS STRING, playname AS STRING)
+    DracorPlayPath$ = "/corpora/" + DracorUrlEncode$(corpusname) + "/plays/" + DracorUrlEncode$(playname)
+END FUNCTION
+
+' /corpora/{corpusname}/plays/{playname} - play metadata.
+FUNCTION DracorGetPlay& (j AS Json, corpusname AS STRING, playname AS STRING)
+    DracorGetPlay& = DracorGetJson&(j, DracorPlayPath$(corpusname, playname))
+END FUNCTION
+
+' /corpora/{corpusname}/plays/{playname}/metrics - network metrics.
+FUNCTION DracorGetPlayMetrics& (j AS Json, corpusname AS STRING, playname AS STRING)
+    DracorGetPlayMetrics& = DracorGetJson&(j, DracorPlayPath$(corpusname, playname) + "/metrics")
+END FUNCTION
+
+' /corpora/{corpusname}/plays/{playname}/characters - array of characters.
+FUNCTION DracorGetPlayCharacters& (j AS Json, corpusname AS STRING, playname AS STRING)
+    DracorGetPlayCharacters& = DracorGetJson&(j, DracorPlayPath$(corpusname, playname) + "/characters")
+END FUNCTION
+
+' /corpora/{corpusname}/plays/{playname}/spoken-text - plain text (UTF-8).
+' sex: "" for all characters, or "MALE", "FEMALE", "UNKNOWN".
+FUNCTION DracorGetSpokenText$ (corpusname AS STRING, playname AS STRING, sex AS STRING)
+    DIM path AS STRING
+    path = DracorPlayPath$(corpusname, playname) + "/spoken-text"
+    IF sex <> "" THEN path = path + "?sex=" + DracorUrlEncode$(UCASE$(sex))
+    DracorGetSpokenText$ = DracorGet$(path)
+END FUNCTION
+
+' ---------------------------------------------------------------------------
+' DraCor IDs
+' ---------------------------------------------------------------------------
+
+' Resolve a DraCor ID (e.g. "ger000088") via /id/{id}. On success returns -1
+' and sets corpusname and playname (passed by reference); returns 0 on error.
+'
+' The API answers /id/{id} with a 303 redirect. With "Accept: application/json"
+' it points to the play's API URL, otherwise to the play's page in the web
+' frontend (https://dracor.org/{corpusname}/{playname}). QB64-PE's built-in
+' HTTP client cannot set request headers, so we follow the frontend redirect
+' and read corpus and play name from the last two segments of the final URL.
+FUNCTION DracorResolveId% (id AS STRING, corpusname AS STRING, playname AS STRING)
+    DIM dummy AS STRING, u AS STRING, p AS LONG
+    DracorResolveId% = 0
+
+    dummy = DracorGet$("/id/" + DracorUrlEncode$(id))
+    IF DracorError <> "" THEN EXIT FUNCTION
+
+    u = DracorFinalUrl
+    p = INSTR(u, "?"): IF p THEN u = LEFT$(u, p - 1)
+    p = INSTR(u, "#"): IF p THEN u = LEFT$(u, p - 1)
+    DO WHILE RIGHT$(u, 1) = "/": u = LEFT$(u, LEN(u) - 1): LOOP
+
+    p = _INSTRREV(u, "/")
+    IF p = 0 THEN DracorError = "Unexpected redirect target: " + DracorFinalUrl: EXIT FUNCTION
+    playname = MID$(u, p + 1)
+    u = LEFT$(u, p - 1)
+    p = _INSTRREV(u, "/")
+    IF p = 0 THEN DracorError = "Unexpected redirect target: " + DracorFinalUrl: EXIT FUNCTION
+    corpusname = MID$(u, p + 1)
+
+    IF corpusname = "" OR playname = "" THEN
+        DracorError = "Unexpected redirect target: " + DracorFinalUrl
+        EXIT FUNCTION
+    END IF
+    DracorResolveId% = -1
+END FUNCTION
+
+' Resolve a DraCor ID and load the play metadata into j. Checks that the
+' play's "id" matches. Returns the root token or -1 on error.
+FUNCTION DracorGetPlayById& (j AS Json, id AS STRING)
+    DIM c AS STRING, p AS STRING, root AS LONG
+    DracorGetPlayById& = -1
+    IF NOT DracorResolveId%(id, c, p) THEN EXIT FUNCTION
+    root = DracorGetPlay&(j, c, p)
+    IF root < 0 THEN EXIT FUNCTION
+    IF DracorStr$(j, root, "id") <> id THEN
+        DracorError = "ID " + id + " resolved to " + c + "/" + p + ", which has ID " + DracorStr$(j, root, "id")
+        EXIT FUNCTION
+    END IF
+    DracorGetPlayById& = root
+END FUNCTION
+
+' ---------------------------------------------------------------------------
+' Helpers for reading values out of the Json object
+'
+' query uses qb64pe-json syntax: "title", "authors(0).name", "metrics.plays".
+' An empty query means the token itself.
+' ---------------------------------------------------------------------------
+
+FUNCTION DracorToken& (j AS Json, tok AS LONG, query AS STRING)
+    DIM t AS LONG
+    IF query = "" THEN t = tok ELSE t = JsonQueryFrom&(j, tok, query)
+    IF JsonHadError THEN t = -1
+    DracorToken& = t
+END FUNCTION
+
+' String value ("" if missing or null). Numbers and booleans are converted.
+FUNCTION DracorStr$ (j AS Json, tok AS LONG, query AS STRING)
+    DIM t AS LONG
+    t = DracorToken&(j, tok, query)
+    IF t < 0 THEN EXIT FUNCTION
+    IF JsonTokenGetType&(j, t) <> JSONTOK_TYPE_VALUE THEN EXIT FUNCTION
+    IF JsonTokenGetPrimType&(j, t) = JSONTOK_PRIM_NULL THEN EXIT FUNCTION
+    DracorStr$ = JsonTokenGetValueStr$(j, t)
+END FUNCTION
+
+' Numeric value (0 if missing, null or not a number).
+FUNCTION DracorNum# (j AS Json, tok AS LONG, query AS STRING)
+    DIM t AS LONG
+    t = DracorToken&(j, tok, query)
+    IF t < 0 THEN EXIT FUNCTION
+    IF JsonTokenGetType&(j, t) <> JSONTOK_TYPE_VALUE THEN EXIT FUNCTION
+    IF JsonTokenGetPrimType&(j, t) <> JSONTOK_PRIM_NUMBER THEN EXIT FUNCTION
+    DracorNum# = JsonTokenGetValueDouble#(j, t)
+END FUNCTION
+
+' Number of entries of an array (or keys of an object); 0 if missing.
+FUNCTION DracorCount& (j AS Json, tok AS LONG, query AS STRING)
+    DIM t AS LONG, typ AS LONG
+    t = DracorToken&(j, tok, query)
+    IF t < 0 THEN EXIT FUNCTION
+    typ = JsonTokenGetType&(j, t)
+    IF typ = JSONTOK_TYPE_ARRAY OR typ = JSONTOK_TYPE_OBJECT THEN
+        DracorCount& = JsonTokenTotalChildren&(j, t)
+    END IF
+END FUNCTION
+
+' Token of entry number index (0-based) of an array; -1 if out of range.
+FUNCTION DracorItem& (j AS Json, tok AS LONG, query AS STRING, index AS LONG)
+    DIM t AS LONG
+    DracorItem& = -1
+    t = DracorToken&(j, tok, query)
+    IF t < 0 THEN EXIT FUNCTION
+    IF JsonTokenGetType&(j, t) <> JSONTOK_TYPE_ARRAY THEN EXIT FUNCTION
+    IF index < 0 OR index >= JsonTokenTotalChildren&(j, t) THEN EXIT FUNCTION
+    DracorItem& = JsonTokenGetChild&(j, t, index)
+END FUNCTION
+
+' Names of the authors of a play (from play metadata or a corpus' play list),
+' joined with sep.
+FUNCTION DracorPlayAuthors$ (j AS Json, playTok AS LONG, sep AS STRING)
+    DIM i AS LONG, n AS LONG, s AS STRING, a AS LONG
+    n = DracorCount&(j, playTok, "authors")
+    FOR i = 0 TO n - 1
+        a = DracorItem&(j, playTok, "authors", i)
+        IF i > 0 THEN s = s + sep
+        s = s + DracorStr$(j, a, "name")
+    NEXT
+    DracorPlayAuthors$ = s
+END FUNCTION
+
+' ---------------------------------------------------------------------------
+' Strings
+' ---------------------------------------------------------------------------
+
+' Percent-encode everything except unreserved characters (RFC 3986).
+FUNCTION DracorUrlEncode$ (s AS STRING)
+    DIM i AS LONG, c AS LONG, r AS STRING
+    FOR i = 1 TO LEN(s)
+        c = ASC(s, i)
+        SELECT CASE c
+            CASE 48 TO 57, 65 TO 90, 97 TO 122, 45, 46, 95, 126
+                r = r + CHR$(c)
+            CASE ELSE
+                r = r + "%" + RIGHT$("0" + HEX$(c), 2)
+        END SELECT
+    NEXT
+    DracorUrlEncode$ = r
+END FUNCTION
+
+' QB64-PE strings are byte strings; LEN counts bytes. This counts UTF-8
+' characters (code points) instead.
+FUNCTION DracorUtf8Len& (s AS STRING)
+    DIM i AS LONG, n AS LONG
+    FOR i = 1 TO LEN(s)
+        IF (ASC(s, i) AND &HC0) <> &H80 THEN n = n + 1
+    NEXT
+    DracorUtf8Len& = n
+END FUNCTION
