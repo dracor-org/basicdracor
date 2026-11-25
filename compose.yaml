@@ -1,0 +1,16 @@
+# docker compose run --rm basicdracor          -> interactive shell
+# docker compose run --rm basicdracor demo     -> run the demo
+services:
+  basicdracor:
+    build:
+      context: .
+      platforms: [linux/amd64]
+    platform: linux/amd64
+    image: basicdracor
+    stdin_open: true
+    tty: true
+    volumes:
+      # BASIC sources from the host; edit there, recompile in the container
+      - ./src:/home/dracor/basicdracor/src
+      - ./examples:/home/dracor/basicdracor/examples
+      - ./tests:/home/dracor/basicdracor/tests

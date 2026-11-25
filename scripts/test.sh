@@ -10,6 +10,7 @@ QB64PE_NOPROMPT=y
 export QB64PE_NOPROMPT
 
 TIMEOUT=120
+BIN="${BASICDRACOR_BIN:-$ROOT/bin}"
 
 # Run a command, kill it after $TIMEOUT seconds (macOS has no `timeout`).
 run_with_timeout() {
@@ -38,12 +39,12 @@ if [ "${SKIP_BUILD:-}" = "" ]; then
 fi
 
 echo "== BASIC test program =="
-run_with_timeout bin/test_dracor
+run_with_timeout "$BIN/test_dracor"
 tests_rc=$?
 
 echo
 echo "== Demo output =="
-out="$(run_with_timeout bin/demo)"
+out="$(run_with_timeout "$BIN/demo")"
 demo_rc=$?
 echo "$out"
 
