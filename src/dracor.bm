@@ -74,8 +74,8 @@ FUNCTION DracorHttpGet$ (url AS STRING)
     IF LEFT$(DracorFinalUrl, 5) = "HTTP:" THEN DracorFinalUrl = MID$(DracorFinalUrl, 6)
     CLOSE h
 
-    ' The QB64-PE HTTP client does not ask for compression, but the DraCor
-    ' server sends some responses gzip-compressed anyway.
+    ' The QB64-PE HTTP client does not ask for compression, but some
+    ' responses arrive gzip-compressed anyway (possibly a caching effect).
     IF DracorIsGzip%(body) THEN body = DracorGunzip$(body)
     IF DracorError <> "" THEN EXIT FUNCTION
 
