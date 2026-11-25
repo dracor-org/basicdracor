@@ -172,8 +172,9 @@ output. The suite sends about 20 GET requests.
   `Accept: application/json`. `/id/{id}` therefore redirects to the web page
   (`https://dracor.org/{corpus}/{play}`), and `DracorResolveId%` reads corpus
   and play name from that URL. This breaks if the frontend URLs change. For the
-  same reason, TEI, CSV and RDF formats that the API selects via `Accept` are
-  not available.
+  same reason, formats that the API offers only via the `Accept` header (e.g.
+  RDF) are not available; TEI and CSV have their own endpoints (`…/tei`,
+  `…/csv`).
 - **gzip**: the server sends some responses gzip-compressed even though the
   client did not ask for it. basicDraCor detects this and decompresses with
   `_INFLATE$`, checked against the gzip CRC-32.

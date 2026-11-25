@@ -1,6 +1,6 @@
 # Sourced by the other scripts.
 #
-# Workaround for a broken Command Line Tools install seen on the author's Mac:
+# Workaround for incomplete Command Line Tools installations, where
 # /Library/Developer/CommandLineTools/usr/include/c++/v1 contains only a few
 # stray files, so clang++ cannot find <cstddef>. We point clang++ at the
 # complete libc++ headers inside the macOS SDK instead. On a healthy setup this
