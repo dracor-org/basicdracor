@@ -175,8 +175,8 @@ output. The suite sends about 20 GET requests.
   same reason, formats that the API offers only via the `Accept` header (e.g.
   RDF) are not available; TEI and CSV have their own endpoints (`…/tei`,
   `…/csv`).
-- **gzip**: the server sends some responses gzip-compressed even though the
-  client did not ask for it. basicDraCor detects this and decompresses with
+- **gzip**: some responses arrive gzip-compressed even though the client did
+  not ask for it (possibly a caching effect). basicDraCor detects this and decompresses with
   `_INFLATE$`, checked against the gzip CRC-32.
 - **Empty responses**: in QB64-PE 4.7.0, `_STATUSCODE` fails with "Subscript
   out of range" on responses without a body. DraCor's 404s have no body. In
